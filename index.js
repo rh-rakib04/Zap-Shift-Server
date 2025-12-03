@@ -20,6 +20,7 @@ admin.initializeApp({
 app.use(express.json());
 app.use(cors());
 
+// verify token middleware user authentication
 const verifyToken = async (req, res, next) => {
   // console.log("token verified-------------", req.headers.authorization);
   const token = req.headers.authorization;
@@ -68,7 +69,50 @@ async function run() {
     const parcelsCollection = db.collection("parcels");
     const paymentsCollection = db.collection("payments");
 
+    // admin verify middleware
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decodedEmail;
+      const query = { email: email };
+      const user = await usersCollection.findOne(query);
+      if (!user || user.role !== "admin") {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+
+      next();
+    };
+
     // users APIs---------------------
+
+    app.get("/users", verifyToken, async (req, res) => {
+      const searchText = req.query.searchText;
+      const query = {};
+      if (searchText) {
+        query.$or = [
+          { displayName: { $regex: searchText, $options: "i" } },
+          { email: { $regex: searchText, $options: "i" } },
+        ];
+      }
+
+      const cursor = usersCollection
+        .find(query)
+        .sort({ createdAt: -1 })
+        .limit(10);
+      const result = await cursor.toArray();
+      res.send(result);
+    });
+
+    app.get(
+      "/users/:email/role",
+      verifyToken,
+
+      async (req, res) => {
+        const email = req.params.email;
+        const query = { email };
+        const user = await usersCollection.findOne(query);
+        res.send({ role: user?.role || "user" });
+      }
+    );
+
     app.post("/users", async (req, res) => {
       const user = req.body;
       user.createdAt = new Date();
@@ -82,12 +126,26 @@ async function run() {
       res.send(result);
     });
 
+    app.patch("/users/:id/role", verifyToken, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const roleInfo = req.body.role;
+      const query = { _id: new ObjectId(id) };
+      const update = {
+        $set: { role: roleInfo },
+      };
+      const result = await usersCollection.updateOne(query, update);
+      res.send(result);
+    });
+
     // parcels APIs-------------
     app.get("/parcels", async (req, res) => {
       const query = {};
-      const { email } = req.query;
+      const { email, deliveryStatus } = req.query;
       if (email) {
         query.senderEmail = email;
+      }
+      if (deliveryStatus) {
+        query.deliveryStatus = deliveryStatus;
       }
       const options = { sort: { createdAt: -1 } };
       const cursor = parcelsCollection.find(query, options);
@@ -114,6 +172,30 @@ async function run() {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await parcelsCollection.deleteOne(query);
+      res.send(result);
+    });
+
+    app.patch("/parcels/:id", async (req, res) => {
+      const { riderId, riderName, riderEmail } = req.body;
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const update = {
+        $set: {
+          riderId,
+          riderName,
+          riderEmail,
+          deliveryStatus: "out-for-delivery",
+        },
+      };
+      const result = await parcelsCollection.updateOne(query, update);
+      // update rider work status to busy
+      const riderQuery = { _id: new ObjectId(riderId) };
+      const riderUpdate = {
+        $set: {
+          workStatus: "busy",
+        },
+      };
+      await ridersCollection.updateOne(riderQuery, riderUpdate);
       res.send(result);
     });
 
@@ -172,6 +254,7 @@ async function run() {
         const update = {
           $set: {
             paymentStatus: "paid",
+            deliveryStatus: "pending-pickup",
             trackingId: trackingId,
             amount: amountBDT,
           },
@@ -224,9 +307,16 @@ async function run() {
     // riders APIs---------------------
 
     app.get("/riders", async (req, res) => {
+      const { status, district, workStatus } = req.query;
       const query = {};
-      if (req.query.status) {
-        query.status = req.query.status;
+      if (status) {
+        query.status = status;
+      }
+      if (district) {
+        query.riderDistrict = district;
+      }
+      if (workStatus) {
+        query.workStatus = workStatus;
       }
       const cursor = ridersCollection.find(query);
       const result = await cursor.toArray();
@@ -242,12 +332,15 @@ async function run() {
       res.send(result);
     });
 
-    app.patch("/riders/:id", verifyToken, async (req, res) => {
+    app.patch("/riders/:id", verifyToken, verifyAdmin, async (req, res) => {
       const id = req.params.id;
       const status = req.body.status;
       const query = { _id: new ObjectId(id) };
       const update = {
-        $set: { status: status },
+        $set: {
+          status: status,
+          workStatus: "available",
+        },
       };
       const result = await ridersCollection.updateOne(query, update);
       if (status === "approved") {
@@ -260,7 +353,6 @@ async function run() {
       }
       res.send(result);
     });
-
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
